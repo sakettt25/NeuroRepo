@@ -1,5 +1,3 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-
 export interface AnalyzeResponse {
   id: string;
   repo: RepoMetadata;
@@ -59,7 +57,7 @@ export interface ChatResponse {
 }
 
 export async function analyzeRepo(repoUrl: string): Promise<AnalyzeResponse> {
-  const res = await fetch(`${API_BASE}/api/analyze`, {
+  const res = await fetch(`/api/analyze`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ repoUrl }),
@@ -72,13 +70,13 @@ export async function analyzeRepo(repoUrl: string): Promise<AnalyzeResponse> {
 }
 
 export async function getFileContent(sessionId: string, path: string): Promise<FileContent> {
-  const res = await fetch(`${API_BASE}/api/repo/${sessionId}/file?path=${encodeURIComponent(path)}`);
+  const res = await fetch(`/api/repo/${sessionId}/file?path=${encodeURIComponent(path)}`);
   if (!res.ok) throw new Error("File not found");
   return res.json();
 }
 
 export async function sendChatMessage(sessionId: string, message: string): Promise<ChatResponse> {
-  const res = await fetch(`${API_BASE}/api/repo/${sessionId}/chat`, {
+  const res = await fetch(`/api/repo/${sessionId}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message }),
@@ -88,7 +86,7 @@ export async function sendChatMessage(sessionId: string, message: string): Promi
 }
 
 export async function getDiagrams(sessionId: string): Promise<DiagramSet> {
-  const res = await fetch(`${API_BASE}/api/repo/${sessionId}/diagrams`);
+  const res = await fetch(`/api/repo/${sessionId}/diagrams`);
   if (!res.ok) throw new Error("Diagrams not found");
   return res.json();
 }
