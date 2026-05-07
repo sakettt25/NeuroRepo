@@ -1,5 +1,5 @@
 // In-Memory Data Store — implements IDataStore interface
-// Easily swappable with MongoDB/Redis in Phase 2
+// Uses globalThis to persist across Next.js hot reloads in dev mode
 
 import { IDataStore, AnalysisSession } from "../types";
 
@@ -36,5 +36,11 @@ export class InMemoryStore implements IDataStore {
   }
 }
 
-// Singleton instance
-export const dataStore = new InMemoryStore();
+// Persist singleton across Next.js hot reloads using globalThis
+const globalForStore = globalThis as unknown as { __dataStore?: InMemoryStore };
+
+if (!globalForStore.__dataStore) {
+  globalForStore.__dataStore = new InMemoryStore();
+}
+
+export const dataStore: InMemoryStore = globalForStore.__dataStore;

@@ -32,11 +32,11 @@ function generateArchitectureDiagram(graph: KnowledgeGraph, analysis: AnalysisRe
   for (const [group, files] of groups) {
     if (files.length === 0) continue;
     const safeGroup = sanitizeId(group);
-    lines.push(`  subgraph ${safeGroup}["${group}"]`);
+    lines.push(`  subgraph ${safeGroup}["📁 ${group}"]`);
     for (const file of files.slice(0, 10)) { // Limit per group
       const id = sanitizeId(file);
       const label = file.split("/").pop() || file;
-      lines.push(`    ${id}["${label}"]`);
+      lines.push(`    ${id}["📄 ${label}"]`);
     }
     if (files.length > 10) {
       lines.push(`    ${safeGroup}_more["... +${files.length - 10} more"]`);
@@ -49,8 +49,16 @@ function generateArchitectureDiagram(graph: KnowledgeGraph, analysis: AnalysisRe
   const addedEdges = new Set<string>();
   for (const edge of graph.edges) {
     if (edge.type !== "imports") continue;
-    const srcFile = edge.source.replace("file:", "");
-    const tgtFile = edge.target.replace("file:", "");
+    
+    let srcFile = "";
+    let tgtFile = "";
+    
+    if (edge.source.startsWith("file:")) srcFile = edge.source.replace("file:", "");
+    else continue;
+    
+    if (edge.target.startsWith("file:")) tgtFile = edge.target.replace("file:", "");
+    else continue;
+    
     const srcGroup = srcFile.split("/")[0];
     const tgtGroup = tgtFile.split("/")[0];
     if (srcGroup !== tgtGroup) {
@@ -64,7 +72,8 @@ function generateArchitectureDiagram(graph: KnowledgeGraph, analysis: AnalysisRe
 
   // Style
   lines.push("");
-  lines.push("  classDef default fill:#1a1a2e,stroke:#6366f1,stroke-width:1px,color:#e2e8f0");
+  lines.push("  classDef default fill:#1e1e2f,stroke:#6366f1,stroke-width:2px,color:#e2e8f0,rx:8,ry:8");
+  lines.push("  classDef cluster fill:#0f172a,stroke:#475569,stroke-width:2px,color:#94a3b8,rx:10,ry:10");
 
   return lines.join("\n");
 }
@@ -72,42 +81,62 @@ function generateArchitectureDiagram(graph: KnowledgeGraph, analysis: AnalysisRe
 function generateDependencyDiagram(graph: KnowledgeGraph): string {
   const lines: string[] = ["graph LR"];
 
-  // Only show file-level import edges
-  const fileEdges = graph.edges.filter(e => e.type === "imports" && e.source.startsWith("file:") && e.target.startsWith("file:"));
+  // Show both internal file dependencies and external package dependencies
+  const depEdges = graph.edges.filter(e => e.type === "imports" && e.source.startsWith("file:"));
 
-  // Limit to most connected files
+  // Limit to most connected files/packages
   const connectivity = new Map<string, number>();
-  for (const edge of fileEdges) {
+  for (const edge of depEdges) {
     connectivity.set(edge.source, (connectivity.get(edge.source) || 0) + 1);
     connectivity.set(edge.target, (connectivity.get(edge.target) || 0) + 1);
   }
 
-  const topFiles = [...connectivity.entries()]
+  const topNodes = [...connectivity.entries()]
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 20)
+    .slice(0, 30) // Increased limit for better coverage
     .map(e => e[0]);
-  const topSet = new Set(topFiles);
+  const topSet = new Set(topNodes);
 
-  // Add nodes
-  for (const fileId of topFiles) {
-    const filePath = fileId.replace("file:", "");
-    const id = sanitizeId(filePath);
-    const label = filePath.split("/").pop() || filePath;
-    lines.push(`  ${id}["${label}"]`);
+  if (topNodes.length === 0) {
+    return `graph LR\n  empty["No dependencies found"]\n  style empty fill:#1e1e2f,stroke:#f43f5e,stroke-width:2px,color:#fff,rx:8,ry:8`;
+  }
+
+  // Add nodes with appropriate styling based on type
+  const packageNodes: string[] = [];
+  const fileNodes: string[] = [];
+
+  for (const nodeId of topNodes) {
+    if (nodeId.startsWith("package:")) {
+      const label = nodeId.replace("package:", "");
+      const id = sanitizeId(nodeId);
+      lines.push(`  ${id}(["📦 ${label}"])`);
+      packageNodes.push(id);
+    } else {
+      const filePath = nodeId.replace("file:", "");
+      const label = filePath.split("/").pop() || filePath;
+      const id = sanitizeId(nodeId);
+      lines.push(`  ${id}["📄 ${label}"]`);
+      fileNodes.push(id);
+    }
   }
 
   // Add edges
-  for (const edge of fileEdges) {
+  for (const edge of depEdges) {
     if (topSet.has(edge.source) && topSet.has(edge.target)) {
-      const srcId = sanitizeId(edge.source.replace("file:", ""));
-      const tgtId = sanitizeId(edge.target.replace("file:", ""));
+      const srcId = sanitizeId(edge.source);
+      const tgtId = sanitizeId(edge.target);
       const label = edge.label ? `|"${truncate(edge.label, 20)}"|` : "";
       lines.push(`  ${srcId} -->${label} ${tgtId}`);
     }
   }
 
   lines.push("");
-  lines.push("  classDef default fill:#1a1a2e,stroke:#06b6d4,stroke-width:1px,color:#e2e8f0");
+  lines.push("  classDef default fill:#1e1e2f,stroke:#0ea5e9,stroke-width:2px,color:#e2e8f0,rx:8,ry:8");
+  lines.push("  classDef package fill:#2e1065,stroke:#a855f7,stroke-width:2px,color:#e9d5ff,rx:12,ry:12");
+  
+  if (packageNodes.length > 0) {
+    lines.push(`  class ${packageNodes.join(",")} package`);
+  }
 
   return lines.join("\n");
 }
@@ -148,53 +177,64 @@ function generateDataFlowDiagram(
     }
   }
 
+  let layerCount = 0;
+
   // Build flow diagram
   if (categories.ui.length > 0) {
-    lines.push('  subgraph UI["🖥️ UI Layer"]');
-    for (const f of categories.ui.slice(0, 5)) {
-      lines.push(`    ${sanitizeId(f)}["${f.split("/").pop()}"]`);
+    lines.push('  subgraph UI["🖥️ User Interface"]');
+    for (const f of categories.ui.slice(0, 8)) {
+      lines.push(`    ${sanitizeId(f)}["✨ ${f.split("/").pop()}"]`);
     }
     lines.push("  end");
+    layerCount++;
   }
 
   if (categories.api.length > 0) {
-    lines.push('  subgraph API["⚡ API Layer"]');
-    for (const f of categories.api.slice(0, 5)) {
-      lines.push(`    ${sanitizeId(f)}["${f.split("/").pop()}"]`);
+    lines.push('  subgraph API["⚡ API & Controllers"]');
+    for (const f of categories.api.slice(0, 8)) {
+      lines.push(`    ${sanitizeId(f)}["🔌 ${f.split("/").pop()}"]`);
     }
     lines.push("  end");
+    layerCount++;
   }
 
   if (categories.service.length > 0) {
-    lines.push('  subgraph SVC["🔧 Service Layer"]');
-    for (const f of categories.service.slice(0, 5)) {
-      lines.push(`    ${sanitizeId(f)}["${f.split("/").pop()}"]`);
+    lines.push('  subgraph SVC["🔧 Business Logic"]');
+    for (const f of categories.service.slice(0, 8)) {
+      lines.push(`    ${sanitizeId(f)}["⚙️ ${f.split("/").pop()}"]`);
     }
     lines.push("  end");
+    layerCount++;
   }
 
   if (categories.data.length > 0) {
-    lines.push('  subgraph DATA["💾 Data Layer"]');
-    for (const f of categories.data.slice(0, 5)) {
-      lines.push(`    ${sanitizeId(f)}["${f.split("/").pop()}"]`);
+    lines.push('  subgraph DATA["💾 Data Access Layer"]');
+    for (const f of categories.data.slice(0, 8)) {
+      lines.push(`    ${sanitizeId(f)}["🗄️ ${f.split("/").pop()}"]`);
     }
     lines.push("  end");
+    layerCount++;
   }
 
-  // Add flow arrows between layers
-  if (categories.ui.length > 0 && categories.api.length > 0) lines.push("  UI --> API");
-  if (categories.api.length > 0 && categories.service.length > 0) lines.push("  API --> SVC");
-  if (categories.service.length > 0 && categories.data.length > 0) lines.push("  SVC --> DATA");
-  if (categories.api.length > 0 && categories.data.length > 0 && categories.service.length === 0) lines.push("  API --> DATA");
+  if (layerCount === 0) {
+    return `graph TD\n  empty["Not enough categorized files for Data Flow"]\n  style empty fill:#1e1e2f,stroke:#f43f5e,stroke-width:2px,color:#fff,rx:8,ry:8`;
+  }
+
+  // Add flow arrows between layers (using thick arrows)
+  if (categories.ui.length > 0 && categories.api.length > 0) lines.push("  UI ==>|Requests| API");
+  if (categories.api.length > 0 && categories.service.length > 0) lines.push("  API ==>|Uses| SVC");
+  if (categories.service.length > 0 && categories.data.length > 0) lines.push("  SVC ==>|Reads/Writes| DATA");
+  if (categories.api.length > 0 && categories.data.length > 0 && categories.service.length === 0) lines.push("  API ==>|Direct Data Access| DATA");
 
   lines.push("");
-  lines.push("  classDef default fill:#1a1a2e,stroke:#10b981,stroke-width:1px,color:#e2e8f0");
+  lines.push("  classDef default fill:#1e1e2f,stroke:#10b981,stroke-width:2px,color:#e2e8f0,rx:6,ry:6");
+  lines.push("  classDef cluster fill:#064e3b20,stroke:#10b98150,stroke-width:2px,color:#34d399,rx:10,ry:10");
 
   return lines.join("\n");
 }
 
 function sanitizeId(str: string): string {
-  return str.replace(/[^a-zA-Z0-9]/g, "_").replace(/^_+/, "f_");
+  return str.replace(/[^a-zA-Z0-9]/g, "_").replace(/^_+/, "id_");
 }
 
 function truncate(str: string, max: number): string {

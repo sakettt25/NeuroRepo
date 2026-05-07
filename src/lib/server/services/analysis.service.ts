@@ -8,6 +8,7 @@ export function analyzeRepository(
   fileTree: FileNode[],
   parsedFiles: Map<string, ParsedFile>,
   graph: KnowledgeGraph,
+  files: Map<string, import("../types").FileContent>,
   packageJson?: any,
   repoDescription?: string,
   readmeContent?: string
@@ -41,7 +42,7 @@ export function analyzeRepository(
   const deadCode = findDeadExports(graph, parsedFiles);
 
   // Basic security scan
-  const securityFindings = scanSecurity(parsedFiles);
+  const securityFindings = scanSecurity(files);
 
   // Generate project summary
   let goalDesc = "";
@@ -179,7 +180,7 @@ function findEntryPoints(parsedFiles: Map<string, ParsedFile>, framework: string
   return entries.slice(0, 10);
 }
 
-function scanSecurity(parsedFiles: Map<string, ParsedFile>): { type: string; severity: "critical" | "high" | "medium" | "low"; file: string; line?: number; description: string }[] {
+function scanSecurity(files: Map<string, import("../types").FileContent>): { type: string; severity: "critical" | "high" | "medium" | "low"; file: string; line?: number; description: string }[] {
   const findings: any[] = [];
   const patterns = [
     { regex: /['"](?:sk|pk|api[_-]?key|secret)[_-]?\w*['"]\s*[:=]\s*['"][A-Za-z0-9+/=_-]{20,}['"]/gi, type: "Hardcoded Secret", severity: "critical" as const, desc: "Potential hardcoded API key or secret" },
@@ -187,17 +188,34 @@ function scanSecurity(parsedFiles: Map<string, ParsedFile>): { type: string; sev
     { regex: /eval\s*\(/g, type: "Eval Usage", severity: "high" as const, desc: "Use of eval() is a security risk" },
     { regex: /innerHTML\s*=/g, type: "innerHTML Assignment", severity: "medium" as const, desc: "Direct innerHTML assignment may lead to XSS" },
     { regex: /dangerouslySetInnerHTML/g, type: "Dangerous HTML", severity: "medium" as const, desc: "dangerouslySetInnerHTML usage detected" },
+    { regex: /crypto\.createHash\(['"]md5['"]\)/g, type: "Weak Cryptography", severity: "medium" as const, desc: "MD5 is a weak hashing algorithm" },
+    { regex: /Math\.random\(\)/g, type: "Insecure Randomness", severity: "low" as const, desc: "Math.random() is not cryptographically secure" },
   ];
 
-  for (const [path, parsed] of parsedFiles) {
+  for (const [path, file] of files) {
     // Only scan code files
-    if (!["javascript", "typescript", "python"].includes(parsed.language)) continue;
-    // We need the actual content but we only have parsed data
-    // In a real implementation, we'd scan the raw content
-    // For Phase 1, we'll skip detailed security scanning
+    if (!["javascript", "typescript", "python"].includes(file.language)) continue;
+    
+    for (const pattern of patterns) {
+      // Reset lastIndex for global regexes
+      pattern.regex.lastIndex = 0;
+      let match;
+      while ((match = pattern.regex.exec(file.content)) !== null) {
+        // Calculate line number
+        const line = file.content.substring(0, match.index).split("\n").length;
+        findings.push({
+          type: pattern.type,
+          severity: pattern.severity,
+          file: path,
+          line,
+          description: pattern.desc
+        });
+      }
+    }
   }
 
-  return findings;
+  // Limit findings to top 20 to avoid massive payloads
+  return findings.slice(0, 20);
 }
 
 /**

@@ -35,9 +35,17 @@ export function buildKnowledgeGraph(parsedFiles: Map<string, ParsedFile>): Knowl
     for (const imp of parsed.imports) {
       const resolvedPath = resolveImportPath(path, imp.source, parsedFiles);
       if (resolvedPath) {
-        const targetId = `file:${resolvedPath}`;
-        if (nodeIds.has(targetId)) {
-          edges.push({ source: fileId, target: targetId, type: "imports", label: imp.specifiers.join(", ") || imp.source });
+        if (resolvedPath.startsWith("package:")) {
+          if (!nodeIds.has(resolvedPath)) {
+            nodes.push({ id: resolvedPath, label: resolvedPath.replace("package:", ""), type: "module", filePath: resolvedPath });
+            nodeIds.add(resolvedPath);
+          }
+          edges.push({ source: fileId, target: resolvedPath, type: "imports", label: imp.specifiers.join(", ") || imp.source });
+        } else {
+          const targetId = `file:${resolvedPath}`;
+          if (nodeIds.has(targetId)) {
+            edges.push({ source: fileId, target: targetId, type: "imports", label: imp.specifiers.join(", ") || imp.source });
+          }
         }
       }
     }
@@ -63,8 +71,10 @@ export function buildKnowledgeGraph(parsedFiles: Map<string, ParsedFile>): Knowl
 }
 
 function resolveImportPath(currentFile: string, importSource: string, files: Map<string, ParsedFile>): string | null {
-  // Skip external packages
-  if (!importSource.startsWith(".") && !importSource.startsWith("/") && !importSource.startsWith("@/")) return null;
+  // Treat as external package if it doesn't look like a local path
+  if (!importSource.startsWith(".") && !importSource.startsWith("/") && !importSource.startsWith("@/")) {
+    return `package:${importSource}`;
+  }
 
   const currentDir = currentFile.split("/").slice(0, -1).join("/");
   let resolved: string;

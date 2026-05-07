@@ -66,7 +66,7 @@ export async function POST(req: Request) {
       readmeContent = readmeFile.content;
     }
 
-    const analysis = analyzeRepository(fileTree, parsedFiles, graph, packageJson, repoMeta.description, readmeContent);
+    const analysis = analyzeRepository(fileTree, parsedFiles, graph, files, packageJson, repoMeta.description, readmeContent);
 
     // 8. Generate diagrams
     console.log("  📊 Generating diagrams...");

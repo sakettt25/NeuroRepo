@@ -81,7 +81,10 @@ export async function sendChatMessage(sessionId: string, message: string): Promi
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message }),
   });
-  if (!res.ok) throw new Error("Chat failed");
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: "Chat failed" }));
+    throw new Error(body.error || `Chat failed (HTTP ${res.status})`);
+  }
   return res.json();
 }
 
