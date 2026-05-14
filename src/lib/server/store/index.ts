@@ -41,7 +41,9 @@ export class KVStore implements IDataStore {
   private serialize(session: AnalysisSession): any {
     return {
       ...session,
-      files: Array.from(session.files.entries()),
+      // Omit 'files' to prevent exceeding Vercel KV's 1MB payload limit for large repositories.
+      // The API route will fetch files directly from GitHub when needed.
+      files: [], 
       parsedFiles: Array.from(session.parsedFiles.entries()),
       createdAt: session.createdAt.toISOString()
     };
@@ -50,7 +52,7 @@ export class KVStore implements IDataStore {
   private deserialize(data: any): AnalysisSession {
     return {
       ...data,
-      files: new Map(data.files),
+      files: new Map(), // Initialize empty map, will lazy load from GitHub
       parsedFiles: new Map(data.parsedFiles),
       createdAt: new Date(data.createdAt)
     };
@@ -58,7 +60,12 @@ export class KVStore implements IDataStore {
 
   async saveSession(session: AnalysisSession): Promise<void> {
     const serialized = this.serialize(session);
-    await kv.set(`session:${session.id}`, serialized, { ex: this.TTL_SECONDS });
+    try {
+      await kv.set(`session:${session.id}`, serialized, { ex: this.TTL_SECONDS });
+    } catch (error) {
+      console.error(`KV Set Error for session ${session.id}:`, error);
+      throw error;
+    }
   }
 
   async getSession(id: string): Promise<AnalysisSession | null> {
@@ -98,6 +105,9 @@ if (!globalForStore.__dataStore) {
   if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
     globalForStore.__dataStore = new KVStore();
   } else {
+    if (process.env.NODE_ENV === "production") {
+      console.warn("⚠️ CRITICAL WARNING: Vercel KV environment variables are missing! Using InMemoryStore in production. Serverless routes WILL lose session data!");
+    }
     globalForStore.__dataStore = new InMemoryStore();
   }
 }
