@@ -1,6 +1,5 @@
-// In-Memory Data Store — implements IDataStore interface
-// Uses globalThis to persist across Next.js hot reloads in dev mode
-
+// Data Store — implements IDataStore interface
+import { kv } from "@vercel/kv";
 import { IDataStore, AnalysisSession } from "../types";
 
 export class InMemoryStore implements IDataStore {
@@ -8,7 +7,6 @@ export class InMemoryStore implements IDataStore {
   private maxSessions = 50; // LRU eviction threshold
 
   async saveSession(session: AnalysisSession): Promise<void> {
-    // Evict oldest if at capacity
     if (this.sessions.size >= this.maxSessions && !this.sessions.has(session.id)) {
       const oldest = [...this.sessions.entries()]
         .sort((a, b) => a[1].createdAt.getTime() - b[1].createdAt.getTime())[0];
@@ -36,11 +34,72 @@ export class InMemoryStore implements IDataStore {
   }
 }
 
-// Persist singleton across Next.js hot reloads using globalThis
-const globalForStore = globalThis as unknown as { __dataStore?: InMemoryStore };
+export class KVStore implements IDataStore {
+  // 24 hour TTL for sessions
+  private TTL_SECONDS = 60 * 60 * 24;
 
-if (!globalForStore.__dataStore) {
-  globalForStore.__dataStore = new InMemoryStore();
+  private serialize(session: AnalysisSession): any {
+    return {
+      ...session,
+      files: Array.from(session.files.entries()),
+      parsedFiles: Array.from(session.parsedFiles.entries()),
+      createdAt: session.createdAt.toISOString()
+    };
+  }
+
+  private deserialize(data: any): AnalysisSession {
+    return {
+      ...data,
+      files: new Map(data.files),
+      parsedFiles: new Map(data.parsedFiles),
+      createdAt: new Date(data.createdAt)
+    };
+  }
+
+  async saveSession(session: AnalysisSession): Promise<void> {
+    const serialized = this.serialize(session);
+    await kv.set(`session:${session.id}`, serialized, { ex: this.TTL_SECONDS });
+  }
+
+  async getSession(id: string): Promise<AnalysisSession | null> {
+    const data = await kv.get<any>(`session:${id}`);
+    if (!data) return null;
+    return this.deserialize(data);
+  }
+
+  async deleteSession(id: string): Promise<void> {
+    await kv.del(`session:${id}`);
+  }
+
+  async listSessions(): Promise<{ id: string; repoUrl: string; createdAt: Date }[]> {
+    const keys = await kv.keys("session:*");
+    if (!keys || keys.length === 0) return [];
+    
+    const sessions = [];
+    for (const key of keys) {
+      const data = await kv.get<any>(key);
+      if (data) {
+        sessions.push({
+          id: data.id,
+          repoUrl: data.repoUrl,
+          createdAt: new Date(data.createdAt)
+        });
+      }
+    }
+    return sessions;
+  }
 }
 
-export const dataStore: InMemoryStore = globalForStore.__dataStore;
+// Persist singleton across Next.js hot reloads using globalThis
+const globalForStore = globalThis as unknown as { __dataStore?: IDataStore };
+
+if (!globalForStore.__dataStore) {
+  // Use Vercel KV if configured, otherwise fallback to InMemoryStore
+  if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
+    globalForStore.__dataStore = new KVStore();
+  } else {
+    globalForStore.__dataStore = new InMemoryStore();
+  }
+}
+
+export const dataStore: IDataStore = globalForStore.__dataStore;
