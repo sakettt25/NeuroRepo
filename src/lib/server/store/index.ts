@@ -1,6 +1,17 @@
 // Data Store — implements IDataStore interface
-import { kv } from "@vercel/kv";
+// Supports both Vercel KV env vars (KV_REST_API_*) and Upstash direct env vars (UPSTASH_REDIS_REST_*)
+import { Redis } from "@upstash/redis";
 import { IDataStore, AnalysisSession } from "../types";
+
+// ─── Resolve Redis credentials from either env var naming convention ─────────
+function getRedisCredentials(): { url: string; token: string } | null {
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (url && token) return { url, token };
+  return null;
+}
+
+// ─── InMemoryStore (development fallback) ────────────────────────────────────
 
 export class InMemoryStore implements IDataStore {
   private sessions: Map<string, AnalysisSession> = new Map();
@@ -34,80 +45,132 @@ export class InMemoryStore implements IDataStore {
   }
 }
 
-export class KVStore implements IDataStore {
-  // 24 hour TTL for sessions
-  private TTL_SECONDS = 60 * 60 * 24;
+// ─── RedisStore (production — Upstash Redis) ─────────────────────────────────
+
+export class RedisStore implements IDataStore {
+  private redis: Redis;
+  private TTL_SECONDS = 60 * 60 * 24; // 24 hours
+  // Upstash free tier has a 1MB max request size; leave headroom
+  private MAX_PAYLOAD_BYTES = 900_000;
+
+  constructor(url: string, token: string) {
+    this.redis = new Redis({ url, token });
+  }
 
   private serialize(session: AnalysisSession): any {
-    return {
+    // Convert Maps to serializable arrays and strip heavy data
+    const parsedFilesArr = Array.from(session.parsedFiles.entries());
+
+    const base: any = {
       ...session,
-      // Omit 'files' to prevent exceeding Vercel KV's 1MB payload limit for large repositories.
-      // The API route will fetch files directly from GitHub when needed.
-      files: [], 
-      parsedFiles: Array.from(session.parsedFiles.entries()),
-      createdAt: session.createdAt.toISOString()
+      // Omit raw file contents — they can be re-fetched from GitHub on demand
+      files: [],
+      parsedFiles: parsedFilesArr,
+      createdAt: session.createdAt.toISOString(),
+    };
+
+    // Check payload size and truncate if necessary
+    const json = JSON.stringify(base);
+    if (json.length <= this.MAX_PAYLOAD_BYTES) {
+      return base;
+    }
+
+    console.warn(
+      `⚠️ Session ${session.id} payload is ${(json.length / 1024).toFixed(0)}KB — exceeds safe limit. Trimming graph & parsedFiles.`
+    );
+
+    // Trim: keep only critical graph data, limit parsedFiles
+    return {
+      ...base,
+      graph: {
+        nodes: session.graph.nodes.slice(0, 200),
+        edges: session.graph.edges.slice(0, 500),
+      },
+      parsedFiles: parsedFilesArr.slice(0, 100),
     };
   }
 
   private deserialize(data: any): AnalysisSession {
     return {
       ...data,
-      files: new Map(), // Initialize empty map, will lazy load from GitHub
-      parsedFiles: new Map(data.parsedFiles),
-      createdAt: new Date(data.createdAt)
+      files: new Map(), // Will lazy-load from GitHub
+      parsedFiles: new Map(data.parsedFiles || []),
+      createdAt: new Date(data.createdAt),
     };
   }
 
   async saveSession(session: AnalysisSession): Promise<void> {
     const serialized = this.serialize(session);
     try {
-      await kv.set(`session:${session.id}`, serialized, { ex: this.TTL_SECONDS });
-    } catch (error) {
-      console.error(`KV Set Error for session ${session.id}:`, error);
+      await this.redis.set(`session:${session.id}`, serialized, { ex: this.TTL_SECONDS });
+      console.log(`✅ Redis: Saved session ${session.id}`);
+    } catch (error: any) {
+      console.error(`❌ Redis SET error for session ${session.id}:`, error?.message || error);
       throw error;
     }
   }
 
   async getSession(id: string): Promise<AnalysisSession | null> {
-    const data = await kv.get<any>(`session:${id}`);
-    if (!data) return null;
-    return this.deserialize(data);
+    try {
+      const data = await this.redis.get<any>(`session:${id}`);
+      if (!data) {
+        console.log(`ℹ️ Redis: No session found for id ${id}`);
+        return null;
+      }
+      console.log(`✅ Redis: Retrieved session ${id}`);
+      return this.deserialize(data);
+    } catch (error: any) {
+      console.error(`❌ Redis GET error for session ${id}:`, error?.message || error);
+      return null;
+    }
   }
 
   async deleteSession(id: string): Promise<void> {
-    await kv.del(`session:${id}`);
+    await this.redis.del(`session:${id}`);
   }
 
   async listSessions(): Promise<{ id: string; repoUrl: string; createdAt: Date }[]> {
-    const keys = await kv.keys("session:*");
-    if (!keys || keys.length === 0) return [];
-    
-    const sessions = [];
-    for (const key of keys) {
-      const data = await kv.get<any>(key);
-      if (data) {
-        sessions.push({
-          id: data.id,
-          repoUrl: data.repoUrl,
-          createdAt: new Date(data.createdAt)
-        });
+    try {
+      const keys = await this.redis.keys("session:*");
+      if (!keys || keys.length === 0) return [];
+
+      const sessions = [];
+      for (const key of keys) {
+        const data = await this.redis.get<any>(key);
+        if (data) {
+          sessions.push({
+            id: data.id,
+            repoUrl: data.repoUrl,
+            createdAt: new Date(data.createdAt),
+          });
+        }
       }
+      return sessions;
+    } catch (error: any) {
+      console.error("❌ Redis KEYS error:", error?.message || error);
+      return [];
     }
-    return sessions;
   }
 }
 
-// Persist singleton across Next.js hot reloads using globalThis
+// ─── Singleton initialization ────────────────────────────────────────────────
+
 const globalForStore = globalThis as unknown as { __dataStore?: IDataStore };
 
 if (!globalForStore.__dataStore) {
-  // Use Vercel KV if configured, otherwise fallback to InMemoryStore
-  if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
-    globalForStore.__dataStore = new KVStore();
+  const creds = getRedisCredentials();
+
+  if (creds) {
+    console.log("🔗 DataStore: Using RedisStore (Upstash Redis)");
+    globalForStore.__dataStore = new RedisStore(creds.url, creds.token);
   } else {
     if (process.env.NODE_ENV === "production") {
-      console.warn("⚠️ CRITICAL WARNING: Vercel KV environment variables are missing! Using InMemoryStore in production. Serverless routes WILL lose session data!");
+      console.warn(
+        "⚠️ CRITICAL: No Redis credentials found! Looked for KV_REST_API_URL/TOKEN and UPSTASH_REDIS_REST_URL/TOKEN. " +
+        "Falling back to InMemoryStore — sessions WILL be lost between serverless invocations!"
+      );
     }
+    console.log("🔗 DataStore: Using InMemoryStore (development mode)");
     globalForStore.__dataStore = new InMemoryStore();
   }
 }
